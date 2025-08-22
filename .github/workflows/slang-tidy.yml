@@ -67,27 +67,13 @@ jobs:
           mkdir -p "${SLANG_INSTALL_DIR}"
           cp -r slang-tmp/* "${SLANG_INSTALL_DIR}/"
 
-      - name: Debug install directory
-        run: |
-          echo "=== Debug: Checking SLANG_INSTALL_DIR structure ==="
-          ls -la "${SLANG_INSTALL_DIR}" || echo "Install dir does not exist"
-          find "${SLANG_INSTALL_DIR}" -name "slang-tidy" -type f 2>/dev/null || echo "slang-tidy executable not found"
-          echo "=== Debug: Checking slang-tmp structure ==="
-          ls -la slang-tmp/ || echo "slang-tmp does not exist"
-          find slang-tmp/ -name "slang-tidy" -type f 2>/dev/null || echo "slang-tidy not found in slang-tmp"
-
-      - name: Add to PATH & verify
+      - name: Add to PATH
         run: |
           echo "${SLANG_INSTALL_DIR}/bin" >> $GITHUB_PATH
-          # Check if slang-tidy exists in the expected location
-          if [ -f "${SLANG_INSTALL_DIR}/bin/slang-tidy" ]; then
-            slang-tidy --version
-          else
-            echo "Error: slang-tidy not found at ${SLANG_INSTALL_DIR}/bin/slang-tidy"
-            echo "Available files in ${SLANG_INSTALL_DIR}:"
-            find "${SLANG_INSTALL_DIR}" -type f 2>/dev/null || echo "No files found"
-            exit 1
-          fi
+
+      - name: Verify slang-tidy installation
+        run: |
+          slang-tidy --version
           test -f "${SLANG_TIDY_CONFIG}" || (echo "Config not found at ${SLANG_TIDY_CONFIG}" && exit 1)
 
       - name: Debug Slang install dir
