@@ -9,7 +9,7 @@ on:
 
       config_repo:   { type: string, required: true }
       config_ref:    { type: string, default: "main" }
-      config_path:   { type: string, default: "config/.slang-tidy.yaml" }
+      config_path:   { type: string, default: "config/.slang-tidy" }
 
       base_branch:       { type: string, default: "master" }
       run_full_scan:     { type: string, default: "false" }
@@ -67,20 +67,13 @@ jobs:
           mkdir -p "${SLANG_INSTALL_DIR}"
           cp -r slang-tmp/* "${SLANG_INSTALL_DIR}/"
 
-      - name: Add to PATH
+      - name: Add to PATH & verify
         run: |
           echo "${SLANG_INSTALL_DIR}/bin" >> $GITHUB_PATH
-
-      - name: Verify slang-tidy installation
-        run: |
-          slang-tidy --version
+          echo "SLANG_TIDY_BIN=${SLANG_INSTALL_DIR}/bin/slang-tidy" >> $GITHUB_ENV
+          "${SLANG_INSTALL_DIR}/bin/slang-tidy" --version
           test -f "${SLANG_TIDY_CONFIG}" || (echo "Config not found at ${SLANG_TIDY_CONFIG}" && exit 1)
 
-      - name: Debug Slang install dir
-        run: |
-          ls -l "${SLANG_INSTALL_DIR}/bin"
-
-      # Build file list (diff vs base or full scan)
       - name: Determine SystemVerilog files
         id: files
         shell: bash
@@ -121,71 +114,120 @@ jobs:
           mkdir -p _slang_report
           REPORT="_slang_report/${{ inputs.report_name }}"
       
+          TEMP_REPORT="_slang_report/temp-raw-output.txt"
+          
           set +e
-          slang-tidy --config-file "${SLANG_TIDY_CONFIG}" $FILES | tee "$REPORT"
+          "${SLANG_TIDY_BIN}" --config-file "${SLANG_TIDY_CONFIG}" $FILES | tee "$TEMP_REPORT"
           TIDY_STATUS=${PIPESTATUS[0]}
           set -e
+          
+          REPORT="_slang_report/${{ inputs.report_name }}"
+          sed 's/\x1b\[[0-9;]*m//g' "$TEMP_REPORT" > "$REPORT"
+          
           echo "report_path=$REPORT" >> $GITHUB_OUTPUT
           echo "tidy_status=$TIDY_STATUS" >> $GITHUB_OUTPUT
-      
+          
           SUMMARY_FILE="_slang_report/summary.txt"
           MARKER="=== 341 SLANG-TIDY SUMMARY ==="
-          if grep -qF "$MARKER" "$REPORT"; then
-            awk -v m="$MARKER" 'found || index($0,m){found=1; print}' "$REPORT" > "$SUMMARY_FILE"
+          if grep -qF "$MARKER" "$TEMP_REPORT"; then
+            awk -v m="$MARKER" 'found || index($0,m){found=1; print}' "$TEMP_REPORT" | sed 's/\x1b\[[0-9;]*m//g' > "$SUMMARY_FILE"
           else
-            head -n ${{ inputs.max_print_lines }} "$REPORT" > "$SUMMARY_FILE" || true
+            head -n ${{ inputs.max_print_lines }} "$TEMP_REPORT" | sed 's/\x1b\[[0-9;]*m//g' > "$SUMMARY_FILE" || true
           fi
       
           PREVIEW_FILE="_slang_report/summary_preview.txt"
-          head -n ${{ inputs.max_print_lines }} "$SUMMARY_FILE" > "$PREVIEW_FILE" || true
+          head -n ${{ inputs.max_print_lines }} "$SUMMARY_FILE" | sed 's/\x1b\[[0-9;]*m//g' > "$PREVIEW_FILE" || true
       
+          DELIMITER="EOF_SLANG_TIDY_$(date +%s)"
           {
-            echo "summary_preview<<'EOF'"
+            echo "summary_preview<<$DELIMITER"
             cat "$PREVIEW_FILE"
-            echo "EOF"
+            echo "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
       
+          TOTAL_LINES=$(wc -l < "$SUMMARY_FILE" || echo 0)
+      
+          SHOULD_FAIL="false"
+          FAIL_REASON=""
+          
+          if [[ "${{ inputs.fail_on_findings }}" == "true" ]]; then
+            if [ -s "$REPORT" ]; then
+              SHOULD_FAIL="true"
+              FAIL_REASON="slang-tidy reported findings; see artifact ${REPORT}"
+              echo "::error::${FAIL_REASON}"
+            fi
+          fi
+          
+          if [ "$TIDY_STATUS" -ne 0 ]; then
+            SHOULD_FAIL="true"
+            FAIL_REASON="slang-tidy failed with exit status $TIDY_STATUS"
+            echo "::error::${FAIL_REASON}"
+          fi
+          
+          # Check for various failure indicators in the summary
+          if grep -qE "(FAILED|Failed: [1-9])" "$SUMMARY_FILE"; then
+            SHOULD_FAIL="true"
+            FAIL_REASON="slang-tidy reported failures in summary"
+            echo "::error::${FAIL_REASON}"
+          fi
+          
+          # Check for diagnostics/warnings if fail_on_findings is enabled
+          if [[ "${{ inputs.fail_on_findings }}" == "true" ]]; then
+            if grep -qE "(Warnings: [1-9]|Diagnostics found)" "$SUMMARY_FILE"; then
+              SHOULD_FAIL="true"
+              FAIL_REASON="slang-tidy reported diagnostics/warnings; see artifact"
+              echo "::error::${FAIL_REASON}"
+            fi
+          fi
+          
+          echo "should_fail=$SHOULD_FAIL" >> $GITHUB_OUTPUT
+          echo "fail_reason=$FAIL_REASON" >> $GITHUB_OUTPUT
+
+      - name: Create empty report when no files found
+        if: inputs.upload_report == 'true' && steps.files.outputs.none == 'true'
+        run: |
+          mkdir -p _slang_report
+          echo "No SystemVerilog files found to lint." > "_slang_report/${{ inputs.report_name }}"
+          echo "No SystemVerilog files found to lint." > "_slang_report/summary.txt"
+
+      - name: Add summary to Actions page when no files found
+        if: steps.files.outputs.none == 'true'
+        run: |
           echo "### slang-tidy summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "No SystemVerilog files found to lint." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Add summary to Actions page for all runs
+        if: steps.files.outputs.none == 'false'
+        run: |
+          echo "### slang-tidy summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          cat "$PREVIEW_FILE" >> "$GITHUB_STEP_SUMMARY" || true
+          cat "_slang_report/summary_preview.txt" >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      
-          TOTAL_LINES=$(wc -l < "$SUMMARY_FILE" || echo 0)
-          if [ "$TOTAL_LINES" -gt ${{ inputs.max_print_lines }} ]; then
+          
+          SUMMARY_LINES=$(wc -l < "_slang_report/summary.txt" || echo 0)
+          if [ "$SUMMARY_LINES" -gt ${{ inputs.max_print_lines }} ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "_(truncated; download the artifact for full details)_" >> "$GITHUB_STEP_SUMMARY"
           fi
-      
-          if [[ "${{ inputs.fail_on_findings }}" == "true" ]]; then
-            if [ -s "$REPORT" ]; then
-              echo "::error::slang-tidy reported findings; see artifact ${REPORT}"
-              exit 1
-            fi
-          fi
-
-
-      - name: Comment summary on PR (sticky)
-        if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request' && steps.files.outputs.none == 'false'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          recreate: true
-          header: slang-tidy
-          message: |
-            ### slang-tidy summary
-            _(first ${{ inputs.max_print_lines }} lines from the summary; full report is attached as an artifact)_
-      
-            ```text
-            ${{ steps.run_tidy.outputs.summary_preview }}
-            ```
 
       - name: Upload report artifact
-        if: inputs.upload_report == 'true' && steps.files.outputs.none == 'false'
+        if: inputs.upload_report == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: slang-tidy-report
-          path: _slang_report/**
+          path: |
+            _slang_report/${{ inputs.report_name }}
+            _slang_report/summary.txt
           if-no-files-found: error
+
+      - name: Fail workflow if slang-tidy failed
+        if: steps.files.outputs.none == 'false' && steps.run_tidy.outputs.should_fail == 'true'
+        run: |
+          echo "Workflow failing due to: ${{ steps.run_tidy.outputs.fail_reason }}"
+          exit 1
 
       - name: No SystemVerilog files to lint
         if: steps.files.outputs.none == 'true' && inputs.fail_on_no_files != 'true'
