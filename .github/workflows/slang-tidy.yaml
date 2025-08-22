@@ -1,0 +1,194 @@
+name: Reusable Slang Tidy
+
+on:
+  workflow_call:
+    inputs:
+      producer_repo: { type: string, required: true }
+      slang_tag:     { type: string, default: "master-latest" }
+      artifact_name: { type: string, default: "slang-Linux-gcc-11-release.tar.gz" }
+
+      config_repo:   { type: string, required: true }
+      config_ref:    { type: string, default: "main" }
+      config_path:   { type: string, default: "config/.slang-tidy.yaml" }
+
+      base_branch:       { type: string, default: "master" }
+      run_full_scan:     { type: string, default: "false" }
+      fail_on_no_files:  { type: string, default: "false" }
+
+      upload_report:     { type: string, default: "true" } 
+      report_name:       { type: string, default: "slang-tidy-report.txt" }
+      max_print_lines:   { type: string, default: "200" }
+      fail_on_findings:  { type: string, default: "false" }
+      comment_on_pr:     { type: string, default: "false" } 
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    env:
+      SLANG_INSTALL_DIR: ~/.slang-install
+
+    steps:
+      - name: Checkout target repo (student repo)
+        uses: actions/checkout@v4
+
+      # Pull shared config (public repo)
+      - name: Checkout shared config
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.config_repo }}
+          ref: ${{ inputs.config_ref }}
+          path: _slang_config
+          sparse-checkout: |
+            ${{ inputs.config_path }}
+          sparse-checkout-cone-mode: false
+
+      - name: Set config path
+        run: echo "SLANG_TIDY_CONFIG=$PWD/_slang_config/${{ inputs.config_path }}" >> $GITHUB_ENV
+
+      # Cache the prebuilt tool
+      - name: Restore Slang cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SLANG_INSTALL_DIR }}
+          key: slang-install-linux-${{ inputs.slang_tag }}
+
+      # Download prebuilt Linux artifact only if cache miss
+      - name: Download prebuilt Slang (Linux)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: ${{ inputs.producer_repo }}
+          tag: ${{ inputs.slang_tag }}
+          fileName: ${{ inputs.artifact_name }}
+          out-file-path: slang-tmp
+          extract: true
+
+      - name: Install Slang (cache miss)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${SLANG_INSTALL_DIR}"
+          cp -r slang-tmp/* "${SLANG_INSTALL_DIR}/"
+
+      - name: Add to PATH & verify
+        run: |
+          echo "${SLANG_INSTALL_DIR}/bin" >> $GITHUB_PATH
+          slang-tidy --version
+          test -f "${SLANG_TIDY_CONFIG}" || (echo "Config not found at ${SLANG_TIDY_CONFIG}" && exit 1)
+
+      # Build file list (diff vs base or full scan)
+      - name: Determine SystemVerilog files
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune --unshallow || true
+
+          if [[ "${{ inputs.run_full_scan }}" == "true" ]]; then
+            FILES="$(git ls-files '*.sv' '*.svh' || true)"
+          else
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              BASE="${{ github.event.pull_request.base.sha }}"
+              HEAD="${{ github.sha }}"
+            else
+              BASE_BRANCH="${{ inputs.base_branch }}"
+              git fetch origin "$BASE_BRANCH":refs/remotes/origin/"$BASE_BRANCH"
+              BASE="origin/$BASE_BRANCH"
+              HEAD="${{ github.sha }}"
+            fi
+            mapfile -t ARR < <(git diff --name-only --diff-filter=ACMRT "$BASE" "$HEAD" | grep -Ei '\.(sv|svh)$' || true)
+            FILES="${ARR[*]}"
+          fi
+
+          echo "FILES=$FILES" >> $GITHUB_ENV
+          if [[ -z "$FILES" ]]; then
+            echo "none=true" >> $GITHUB_OUTPUT
+          else
+            echo "none=false" >> $GITHUB_OUTPUT
+            echo "Will lint: $FILES"
+          fi
+
+      - name: Run slang-tidy & capture report
+        if: steps.files.outputs.none == 'false'
+        id: run_tidy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p _slang_report
+          REPORT="_slang_report/${{ inputs.report_name }}"
+      
+          set +e
+          slang-tidy --config-file "${SLANG_TIDY_CONFIG}" $FILES | tee "$REPORT"
+          TIDY_STATUS=${PIPESTATUS[0]}
+          set -e
+          echo "report_path=$REPORT" >> $GITHUB_OUTPUT
+          echo "tidy_status=$TIDY_STATUS" >> $GITHUB_OUTPUT
+      
+          SUMMARY_FILE="_slang_report/summary.txt"
+          MARKER="=== 341 SLANG-TIDY SUMMARY ==="
+          if grep -qF "$MARKER" "$REPORT"; then
+            awk -v m="$MARKER" 'found || index($0,m){found=1; print}' "$REPORT" > "$SUMMARY_FILE"
+          else
+            head -n ${{ inputs.max_print_lines }} "$REPORT" > "$SUMMARY_FILE" || true
+          fi
+      
+          PREVIEW_FILE="_slang_report/summary_preview.txt"
+          head -n ${{ inputs.max_print_lines }} "$SUMMARY_FILE" > "$PREVIEW_FILE" || true
+      
+          {
+            echo "summary_preview<<'EOF'"
+            cat "$PREVIEW_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      
+          echo "### slang-tidy summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat "$PREVIEW_FILE" >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      
+          TOTAL_LINES=$(wc -l < "$SUMMARY_FILE" || echo 0)
+          if [ "$TOTAL_LINES" -gt ${{ inputs.max_print_lines }} ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_(truncated; download the artifact for full details)_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      
+          if [[ "${{ inputs.fail_on_findings }}" == "true" ]]; then
+            if [ -s "$REPORT" ]; then
+              echo "::error::slang-tidy reported findings; see artifact ${REPORT}"
+              exit 1
+            fi
+          fi
+
+
+      - name: Comment summary on PR (sticky)
+        if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request' && steps.files.outputs.none == 'false'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          header: slang-tidy
+          message: |
+            ### slang-tidy summary
+            _(first ${{ inputs.max_print_lines }} lines from the summary; full report is attached as an artifact)_
+      
+            ```text
+            ${{ steps.run_tidy.outputs.summary_preview }}
+            ```
+
+      - name: Upload report artifact
+        if: inputs.upload_report == 'true' && steps.files.outputs.none == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: slang-tidy-report
+          path: _slang_report/**
+          if-no-files-found: error
+
+      - name: No SystemVerilog files to lint
+        if: steps.files.outputs.none == 'true' && inputs.fail_on_no_files != 'true'
+        run: echo "No .sv/.svh files found (or changed); skipping."
+
+      - name: Fail due to no files (policy)
+        if: steps.files.outputs.none == 'true' && inputs.fail_on_no_files == 'true'
+        run: |
+          echo "No .sv/.svh files found (or changed) and fail_on_no_files=true" >&2
+          exit 1
