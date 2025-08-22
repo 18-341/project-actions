@@ -31,7 +31,6 @@ jobs:
       - name: Checkout target repo (student repo)
         uses: actions/checkout@v4
 
-      # Pull shared config (public repo)
       - name: Checkout shared config
         uses: actions/checkout@v4
         with:
@@ -45,7 +44,6 @@ jobs:
       - name: Set config path
         run: echo "SLANG_TIDY_CONFIG=$PWD/_slang_config/${{ inputs.config_path }}" >> $GITHUB_ENV
 
-      # Cache the prebuilt tool
       - name: Restore Slang cache
         id: cache
         uses: actions/cache@v4
@@ -53,7 +51,6 @@ jobs:
           path: ${{ env.SLANG_INSTALL_DIR }}
           key: slang-install-linux-${{ inputs.slang_tag }}
 
-      # Download prebuilt Linux artifact only if cache miss
       - name: Download prebuilt Slang (Linux)
         if: steps.cache.outputs.cache-hit != 'true'
         uses: robinraju/release-downloader@v1
@@ -75,6 +72,10 @@ jobs:
           echo "${SLANG_INSTALL_DIR}/bin" >> $GITHUB_PATH
           slang-tidy --version
           test -f "${SLANG_TIDY_CONFIG}" || (echo "Config not found at ${SLANG_TIDY_CONFIG}" && exit 1)
+
+      - name: Debug Slang install dir
+        run: |
+          ls -l "${SLANG_INSTALL_DIR}/bin"
 
       # Build file list (diff vs base or full scan)
       - name: Determine SystemVerilog files
