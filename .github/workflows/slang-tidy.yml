@@ -90,9 +90,21 @@ jobs:
               HEAD="${{ github.sha }}"
             else
               BASE_BRANCH="${{ inputs.base_branch }}"
-              git fetch origin "$BASE_BRANCH":refs/remotes/origin/"$BASE_BRANCH"
-              BASE="origin/$BASE_BRANCH"
-              HEAD="${{ github.sha }}"
+              # Check if we're pushing to the base branch itself
+              CURRENT_BRANCH="${{ github.ref_name }}"
+              if [[ "$CURRENT_BRANCH" == "$BASE_BRANCH" ]]; then
+                # Direct push to base branch - compare against first commit
+                FIRST_COMMIT=$(git rev-list --max-parents=0 HEAD)
+                BASE="$FIRST_COMMIT"
+                HEAD="${{ github.sha }}"
+                echo "Direct push to base branch detected. Comparing $HEAD against first commit $BASE"
+              else
+                # Push to a different branch - compare against base branch
+                git fetch origin "$BASE_BRANCH":refs/remotes/origin/"$BASE_BRANCH"
+                BASE="origin/$BASE_BRANCH"
+                HEAD="${{ github.sha }}"
+                echo "Branch push detected. Comparing $HEAD against $BASE"
+              fi
             fi
             mapfile -t FILE_ARRAY < <(git diff --name-only --diff-filter=ACMRT "$BASE" "$HEAD" | grep -Ei '\.(sv|svh)$' || true)
             FILES="${FILE_ARRAY[@]}"
