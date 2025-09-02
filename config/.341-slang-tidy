@@ -4,4 +4,6 @@ Checks:
  -style-no-legacy-generate,
  -style-always-comb-block-named,
  -style-enforce-module-instantiation-prefix,
- -style-default-nettype-none
+ -style-default-nettype-none,
+ -style-no-implicit-port-name-in-port-connection,
+ -style-no-dot-var-in-port-connection
