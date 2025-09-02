@@ -82,7 +82,8 @@ jobs:
           git fetch --no-tags --prune --unshallow || true
 
           if [[ "${{ inputs.run_full_scan }}" == "true" ]]; then
-            FILES="$(git ls-files '*.sv' '*.svh' || true)"
+            mapfile -t FILE_ARRAY < <(git ls-files '*.sv' '*.svh' || true)
+            FILES="${FILE_ARRAY[@]}"
           else
             if [[ "${{ github.event_name }}" == "pull_request" ]]; then
               BASE="${{ github.event.pull_request.base.sha }}"
@@ -93,8 +94,8 @@ jobs:
               BASE="origin/$BASE_BRANCH"
               HEAD="${{ github.sha }}"
             fi
-            mapfile -t ARR < <(git diff --name-only --diff-filter=ACMRT "$BASE" "$HEAD" | grep -Ei '\.(sv|svh)$' || true)
-            FILES="${ARR[*]}"
+            mapfile -t FILE_ARRAY < <(git diff --name-only --diff-filter=ACMRT "$BASE" "$HEAD" | grep -Ei '\.(sv|svh)$' || true)
+            FILES="${FILE_ARRAY[@]}"
           fi
 
           echo "FILES=$FILES" >> $GITHUB_ENV
@@ -116,8 +117,11 @@ jobs:
       
           TEMP_REPORT="_slang_report/temp-raw-output.txt"
           
+          # Reconstruct file array from environment variable
+          IFS=' ' read -ra FILE_ARRAY <<< "$FILES"
+          
           set +e
-          "${SLANG_TIDY_BIN}" --config-file "${SLANG_TIDY_CONFIG}" $FILES | tee "$TEMP_REPORT"
+          "${SLANG_TIDY_BIN}" --config-file "${SLANG_TIDY_CONFIG}" "${FILE_ARRAY[@]}" | tee "$TEMP_REPORT"
           TIDY_STATUS=${PIPESTATUS[0]}
           set -e
           
